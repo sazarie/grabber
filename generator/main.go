@@ -1,101 +1,75 @@
 package main
 
 import (
-    "flag"
-    "fmt"
-    "math/rand"
-    "sync"
+	"encoding/json"
+	"fmt"
+	"log"
+	"net/http"
+	"strconv"
+	"time"
+	"github.com/gorilla/websocket"
 )
 
 // ProgramParameters - структура параметров программы
 type ProgramParameters struct {
-    limit int // количество чисел, которые надо сгенерировать
-    goNum int // количество горутин, которые пыхтят над генерацией чисел
+	Limit int `json:"limit"` // количество чисел, которые надо сгенерировать
+	GoNum int `json:"goNum"` // количество горутин, которые пыхтят над генерацией чисел
 }
 
-// структура сет - нужно чтобы элементы сравнивались между собой, поэтому comparable
-type Set[T comparable] struct {
-    data map[T]bool
-    lock sync.Mutex
-}
-//тут есть ресивер
-func (s *Set[T]) Add(item T) { //s *Set[T] процедура объявлена на структуре сет.
-    s.lock.Lock()
-    defer s.lock.Unlock()
-    s.data[item] = true // Т.к. мы объявили структуру, мы можем юзать её в типах аргументов
+// GetMainPage - Функция получения главной страницы
+func GetMainPage(w http.ResponseWriter, r *http.Request) {
+	http.ServeFile(w, r, "./static/index.html") // index.html - этот файл сюда кидается
 }
 
-func (s *Set[T]) Len() int { // возвращает количество элементов в сете
-    s.lock.Lock()
-    defer s.lock.Unlock()
-    return len(s.data)
-
+// ReadBufferSize и WriteBufferSize определяют размер буфера ввода-вывода в байтах
+var upgrader = websocket.Upgrader{
+	ReadBufferSize:  1024,
+	WriteBufferSize: 1024,
 }
-func (s *Set[T]) ForEach(operation func(item T)) { // проходимся по data(map) и вызываем ф-ю из параметра с каждым элементом отображения
-    s.lock.Lock()
-    defer s.lock.Unlock()
-    for i := range(s.data) {
-        operation(i)
-    }
+
+// wsEndpoint - Функция, которая устанавливает что /ws это url для websocket соединения
+func wsEndpoint(w http.ResponseWriter, r *http.Request) {
+	upgrader.CheckOrigin = func(r *http.Request) bool { return true } // Указываю метод валидации ориджина (сайта с которого пришел запрос)
+	// Для любого ориджина возвращаю true, значит подойдет любой сайт
+
+	ws, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Println(err)
+	}
+	log.Println("Client Connected")
+
+	reader(ws)
 }
-/*
-func (s *Set[T]) get() {
-    s.lock.Lock()
-    defer s.lock.Unlock()
-}*/
-// getProgramParameters - получение параметров программы
-func getProgramParameters() ProgramParameters {
-    limit := flag.Int("limit", 150, "Количество чисел для генерации")
-    goNum := flag.Int("goNum", 3, "Количество горутин для генерации чисел")
 
-    flag.Parse()
+// reader - Получает сообщение с websocket и отправляет сгенерированные значения клиенту
+func reader(conn *websocket.Conn) {
+	for {
+		_, p, err := conn.ReadMessage()
+		if err != nil {
+			log.Println(err)
+			return
+		}
+		var params ProgramParameters
+		json.Unmarshal(p, &params) // конвертирует json строку в объект ProgramParameters
+		numbers := make(chan int)
+		generateNumbers(params.Limit, params.GoNum, numbers)
 
-    return ProgramParameters{limit: *limit, goNum: *goNum}
+		for item := range numbers {
+			fmt.Println(item)
+			time.Sleep(time.Millisecond * 100)
+			conn.WriteMessage(websocket.TextMessage, []byte(strconv.Itoa(item)))
+		}
+	}
 }
 
 func main() {
-    parameters := getProgramParameters()
-    numbers := generateNumbers(parameters)
-    print(numbers)
-}
+	http.HandleFunc("/", GetMainPage)
+	http.HandleFunc("/ws", wsEndpoint)
+	http.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir("./static"))))
 
-// generateNumbers -генерирует числа в горутине
-func generateNumbers(parameters ProgramParameters) Set[int] {
-    numbers := Set[int]{data: make(map[int]bool)}
-    //numbers := make(map[int]bool)
-    var wg sync.WaitGroup
-    limit := parameters.limit
-    goNum := parameters.goNum
-    for i := 0; i < goNum; i++ {
-        wg.Add(1)
-        go func() {
-            defer wg.Done()
-            for {
-                randomNumber := rand.Intn(limit + 1)
-                //lock.Lock() //блокирую мапу чтобы не писали в неё другие потоки, пока читаю
-                numbersLen := numbers.Len()
-                if numbersLen >= limit {
-                    //lock.Unlock()
-                    break
-                }
-                numbers.Add(randomNumber) //если всё ок, то записываю число в отображение
-                //lock.Unlock()
-            }
-        }()
-    }
-    wg.Wait()
-    return numbers
-}
-
-// print - печатает сгенерированные числа
-func print(numbers Set[int]) {
-    var wg sync.WaitGroup
-    wg.Add(1)
-    go func() {
-        defer wg.Done()
-        numbers.ForEach(func(item int) {   // печать
-            fmt.Println(item)
-        })
-    }()
-    wg.Wait()
+	fmt.Printf("Starting server at port 8080\n")
+	err := http.ListenAndServe(":8080", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
 }
